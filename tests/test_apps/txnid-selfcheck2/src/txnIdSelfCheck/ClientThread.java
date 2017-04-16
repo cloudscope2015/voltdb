@@ -23,12 +23,6 @@
 
 package txnIdSelfCheck;
 
-import java.io.InterruptedIOException;
-import java.util.Random;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
-
 import org.voltdb.ClientResponseImpl;
 import org.voltdb.VoltProcedure.VoltAbortException;
 import org.voltdb.VoltTable;
@@ -36,8 +30,13 @@ import org.voltdb.client.Client;
 import org.voltdb.client.ClientResponse;
 import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.ProcCallException;
-
 import txnIdSelfCheck.procedures.UpdateBaseProc;
+
+import java.io.InterruptedIOException;
+import java.util.Random;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class ClientThread extends BenchmarkThread {
 

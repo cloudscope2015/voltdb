@@ -36,7 +36,7 @@ HOST="localhost"
 
 # remove build artifacts
 function clean() {
-    rm -rf obj log build debugoutput $APPNAME.jar $APPNAME-alt.jar $APPNAME-noexport.jar voltdbroot
+    rm -rf obj log debugoutput $APPNAME.jar $APPNAME-alt.jar $APPNAME-noexport.jar voltdbroot
 }
 
 # remove everything from "clean" as well as the jarfiles
@@ -46,7 +46,13 @@ function cleanall() {
 
 # compile the source code for procedures and the client into jarfiles
 function jars() {
-    ant
+    mkdir -p obj
+    javac -classpath $CLASSPATH -d obj\
+         src/txnIdSelfCheck/*.java \
+         src/txnIdSelfCheck/procedures/*.java
+    jar cf $APPNAME.jar -C obj txnIdSelfCheck
+     # remove compiled .class files
+    rm -rf obj
 }
 
 # compile the procedure and client jarfiles if they don't exist
