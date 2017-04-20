@@ -46,7 +46,6 @@ import org.hsqldb_voltpatches.VoltXMLElement;
 import org.hsqldb_voltpatches.VoltXMLElement.VoltXMLDiff;
 import org.json_voltpatches.JSONException;
 import org.json_voltpatches.JSONStringer;
-import org.voltcore.utils.CoreUtils;
 import org.voltdb.VoltType;
 import org.voltdb.catalog.CatalogMap;
 import org.voltdb.catalog.Column;
@@ -54,7 +53,6 @@ import org.voltdb.catalog.ColumnRef;
 import org.voltdb.catalog.Constraint;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.DatabaseConfiguration;
-import org.voltdb.catalog.Function;
 import org.voltdb.catalog.Group;
 import org.voltdb.catalog.Index;
 import org.voltdb.catalog.Statement;
@@ -63,7 +61,6 @@ import org.voltdb.common.Constants;
 import org.voltdb.common.Permission;
 import org.voltdb.compiler.ClassMatcher.ClassNameMatchStatus;
 import org.voltdb.compiler.VoltCompiler.DdlProceduresToLoad;
-import org.voltdb.compiler.VoltCompiler.ProcedureDescriptor;
 import org.voltdb.compiler.VoltCompiler.VoltCompilerException;
 import org.voltdb.compilereport.TableAnnotation;
 import org.voltdb.expressions.AbstractExpression;
@@ -492,26 +489,6 @@ public class DDLCompiler {
         return identifier;
     }
 
-    /**
-     * Check whether or not a procedure name is acceptible.
-     * @param identifier the identifier to check
-     * @param statement the statement where the identifier is
-     * @return the given identifier unmodified
-     * @throws VoltCompilerException
-     */
-    private String checkProcedureIdentifier(
-            final String identifier, final String statement
-            ) throws VoltCompilerException {
-        String retIdent = checkIdentifierStart(identifier, statement);
-        if (retIdent.contains(".")) {
-            String msg = String.format(
-                "Invalid procedure name containing dots \"%s\" in DDL: \"%s\"",
-                identifier, statement.substring(0,statement.length()-1));
-            throw m_compiler.new VoltCompilerException(msg);
-        }
-        return retIdent;
-    }
-
    /**
      * Process a VoltDB-specific DDL statement, like PARTITION, REPLICATE,
      * CREATE PROCEDURE, and CREATE ROLE.
@@ -541,113 +518,16 @@ public class DDLCompiler {
         // Either PROCEDURE, FUNCTION, REPLICATE, PARTITION, ROLE, EXPORT or DR
         String commandPrefix = statementMatcher.group(1).toUpperCase();
 
-        // Matches if it is CREATE PROCEDURE [ALLOW <role> ...] [PARTITION ON ...] FROM CLASS <class-name>;
-        statementMatcher = SQLParser.matchCreateProcedureFromClass(statement);
-        if (statementMatcher.matches()) {
-            if (whichProcs != DdlProceduresToLoad.ALL_DDL_PROCEDURES) {
-                return true;
-            }
-            String className = checkIdentifierStart(statementMatcher.group(2), statement);
-            Class<?> clazz;
-            try {
-                clazz = Class.forName(className, true, m_classLoader);
-            }
-            catch (Throwable cause) {
-                // We are here because either the class was not found or the class was found and
-                // the initializer of the class threw an error we can't anticipate. So we will
-                // wrap the error with a runtime exception that we can trap in our code.
-                if (CoreUtils.isStoredProcThrowableFatalToServer(cause)) {
-                    throw (Error)cause;
-                }
-                else {
-                    throw m_compiler.new VoltCompilerException(String.format(
-                            "Cannot load class for procedure: %s",
-                            className), cause);
-                }
-            }
+        StatementProcessingChain statementProcessingChain = new StatementProcessingChain(m_compiler, m_classLoader, m_tracker);
+        statementProcessingChain.addStatementProcessors(
+                    new CreateProcedureFromClassProcessor(),
+                    new CreateProcedureAsScriptProcessor(),
+                    new CreateProcedureAsSQLProcessor(),
+                    new CreateFunctionProcessor(),
+                    new DropFunctionProcessor()
+                );
 
-            ProcedureDescriptor descriptor = m_compiler.new ProcedureDescriptor(
-                    new ArrayList<String>(), null, clazz);
-
-            // Parse the ALLOW and PARTITION clauses.
-            // Populate descriptor roles and returned partition data as needed.
-            CreateProcedurePartitionData partitionData =
-                    parseCreateProcedureClauses(descriptor, statementMatcher.group(1));
-
-            // track the defined procedure
-            String procName = m_tracker.add(descriptor);
-
-            // add partitioning if specified
-            addProcedurePartitionInfo(procName, partitionData, statement);
-
-            return true;
-        }
-
-        // Matches if it is CREATE PROCEDURE <proc-name> [ALLOW <role> ...] [PARTITION ON ...] AS
-        // ### <code-block> ### LANGUAGE <language-name>
-        // We used to support Groovy in pre-5.x, but now we don't
-        statementMatcher = SQLParser.matchCreateProcedureAsScript(statement);
-        if (statementMatcher.matches()) {
-            throw m_compiler.new VoltCompilerException("VoltDB doesn't support inline proceudre creation..");
-        }
-
-        // Matches if it is CREATE PROCEDURE <proc-name> [ALLOW <role> ...] [PARTITION ON ...] AS <select-or-dml-statement>
-        statementMatcher = SQLParser.matchCreateProcedureAsSQL(statement);
-        if (statementMatcher.matches()) {
-            String clazz = checkProcedureIdentifier(statementMatcher.group(1), statement);
-            String sqlStatement = statementMatcher.group(3) + ";";
-
-            ProcedureDescriptor descriptor = m_compiler.new ProcedureDescriptor(
-                    new ArrayList<String>(), clazz, sqlStatement, null, null, false, null);
-
-            // Parse the ALLOW and PARTITION clauses.
-            // Populate descriptor roles and returned partition data as needed.
-            CreateProcedurePartitionData partitionData =
-                    parseCreateProcedureClauses(descriptor, statementMatcher.group(2));
-
-            m_tracker.add(descriptor);
-
-            // add partitioning if specified
-            addProcedurePartitionInfo(clazz, partitionData, statement);
-
-            return true;
-        }
-
-        // Matches if it is CREATE FUNCTION <name> FROM METHOD <class-name>.<method-name>
-        statementMatcher = SQLParser.matchCreateFunctionFromMethod(statement);
-        if (statementMatcher.matches()) {
-            String functionName = checkIdentifierStart(statementMatcher.group(1), statement);
-            String className = checkIdentifierStart(statementMatcher.group(2), statement);
-            String methodName = checkIdentifierStart(statementMatcher.group(3), statement);
-            CatalogMap<Function> functions = db.getFunctions();
-            if (functions.get(functionName) != null) {
-                throw m_compiler.new VoltCompilerException(String.format(
-                        "Function name \"%s\" in CREATE FUNCTION statement already exists.",
-                        functionName));
-            }
-            Function func = functions.add(functionName);
-            func.setFunctionname(functionName);
-            func.setClassname(className);
-            func.setMethodname(methodName);
-            return true;
-        }
-
-        // Matches if it is DROP FUNCTION <name>
-        statementMatcher = SQLParser.matchDropFunction(statement);
-        if (statementMatcher.matches()) {
-            String functionName = checkIdentifierStart(statementMatcher.group(1), statement);
-            boolean ifExists = statementMatcher.group(2) != null;
-            CatalogMap<Function> functions = db.getFunctions();
-            if (functions.get(functionName) != null) {
-                functions.delete(functionName);
-            }
-            else {
-                if (! ifExists) {
-                    throw m_compiler.new VoltCompilerException(String.format(
-                            "Function name \"%s\" in DROP FUNCTION statement does not exist.",
-                            functionName));
-                }
-            }
+        if (statementProcessingChain.process(statement, db, whichProcs)) {
             return true;
         }
 
@@ -1062,93 +942,6 @@ public class DDLCompiler {
                     + "expected syntax: CREATE STREAM <table> [PARTITION ON COLUMN <column-name>] [EXPORT TO TARGET <target>] (column datatype, ...); ",
                     statement.substring(0, statement.length() - 1)));
         }
-    }
-
-    private class CreateProcedurePartitionData {
-        String tableName = null;
-        String columnName = null;
-        String parameterNo = null;
-    }
-
-    /**
-     * Parse and validate the substring containing ALLOW and PARTITION
-     * clauses for CREATE PROCEDURE.
-     * @param clauses  the substring to parse
-     * @param descriptor  procedure descriptor populated with role names from ALLOW clause
-     * @return  parsed and validated partition data or null if there was no PARTITION clause
-     * @throws VoltCompilerException
-     */
-    private CreateProcedurePartitionData parseCreateProcedureClauses(
-            ProcedureDescriptor descriptor,
-            String clauses) throws VoltCompilerException {
-
-        // Nothing to do if there were no clauses.
-        // Null means there's no partition data to return.
-        // There's also no roles to add.
-        if (clauses == null || clauses.isEmpty()) {
-            return null;
-        }
-        CreateProcedurePartitionData data = null;
-
-        Matcher matcher = SQLParser.matchAnyCreateProcedureStatementClause(clauses);
-        int start = 0;
-        while (matcher.find(start)) {
-            start = matcher.end();
-
-            if (matcher.group(1) != null) {
-                // Add roles if it's an ALLOW clause. More that one ALLOW clause is okay.
-                for (String roleName : StringUtils.split(matcher.group(1), ',')) {
-                    // Don't put the same role in the list more than once.
-                   String roleNameFixed = roleName.trim().toLowerCase();
-                    if (!descriptor.m_authGroups.contains(roleNameFixed)) {
-                        descriptor.m_authGroups.add(roleNameFixed);
-                    }
-                }
-            }
-            else {
-                // Add partition info if it's a PARTITION clause. Only one is allowed.
-                if (data != null) {
-                    throw m_compiler.new VoltCompilerException(
-                        "Only one PARTITION clause is allowed for CREATE PROCEDURE.");
-                }
-                data = new CreateProcedurePartitionData();
-                data.tableName = matcher.group(2);
-                data.columnName = matcher.group(3);
-                data.parameterNo = matcher.group(4);
-            }
-        }
-
-        return data;
-    }
-
-    private void addProcedurePartitionInfo(
-            String procName,
-            CreateProcedurePartitionData data,
-            String statement) throws VoltCompilerException {
-
-        assert(procName != null);
-
-        // Will be null when there is no optional partition clause.
-        if (data == null) {
-            return;
-        }
-
-        assert(data.tableName != null);
-        assert(data.columnName != null);
-
-        // Check the identifiers.
-        checkIdentifierStart(procName, statement);
-        checkIdentifierStart(data.tableName, statement);
-        checkIdentifierStart(data.columnName, statement);
-
-        // if not specified default parameter index to 0
-        if (data.parameterNo == null) {
-            data.parameterNo = "0";
-        }
-
-        String partitionInfo = String.format("%s.%s: %s", data.tableName, data.columnName, data.parameterNo);
-
-        m_tracker.addProcedurePartitionInfoTo(procName, partitionInfo);
     }
 
     private void checkValidPartitionTableIndex(Index index, Column partitionCol, String tableName)
